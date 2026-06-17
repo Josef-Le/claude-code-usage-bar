@@ -933,6 +933,29 @@ def _context_window_usage(stdin_data: Dict[str, Any]) -> Tuple[Optional[float], 
     return ctx_pct, int(ctx_size_f), int(ctx_used)
 
 
+def _ctx_session_eta(ctx_pct: Optional[float], total_duration_ms: int) -> str:
+    """ETA until context window exhausted at the avg rate this session.
+
+    Returns a formatted string like '~52m' or '~2h30m', or '' when not
+    computable (too early, or ctx_pct missing/zero).
+    """
+    if ctx_pct is None or ctx_pct <= 0 or total_duration_ms < 30_000:
+        return ""
+    remaining_pct = 100.0 - ctx_pct
+    if remaining_pct <= 0:
+        return "~0m"
+    # rate in %/ms → ETA in ms
+    rate = ctx_pct / total_duration_ms
+    eta_ms = remaining_pct / rate
+    eta_min = int(eta_ms / 60_000)
+    if eta_min < 1:
+        return "~<1m"
+    if eta_min < 60:
+        return f"~{eta_min}m"
+    h, m = eta_min // 60, eta_min % 60
+    return f"~{h}h{m:02d}m"
+
+
 def format_number(num: float) -> str:
     """Format number for detail display."""
     if num >= 1_000_000:
@@ -1194,8 +1217,20 @@ def main(json_output: bool = False,
     # cache countdown: read_activity also returns cache_age_seconds/cache_ttl.
     # When the activity line isn't wanted, fall back to the lean early-exit
     # cache reader (get_cache_age_text) so a cache-only render stays cheap.
-    _want_scan = cfg.show_todos or cfg.show_tools or cfg.show_agents
+    _want_scan = (cfg.show_todos or cfg.show_tools or cfg.show_agents
+                  or cfg.show_agent_progress
+                  or cfg.show_mcp_stats or cfg.show_skill_stats or cfg.show_agent_stats
+                  or cfg.show_error_count or cfg.show_web_count or cfg.show_files_touched)
     _tp = stdin_data.get("transcript_path", "")
+    # After context compression Claude Code keeps the old session_id but writes a new
+    # transcript file (transcript_path). Agent tool_uses always go to <session_id>.jsonl
+    # so we must scan there for agent activity; the summary/continuation file misses them.
+    _session_id = stdin_data.get("session_id", "")
+    if _session_id and _tp:
+        _tp_parent = os.path.dirname(_tp)
+        _session_tp = os.path.join(_tp_parent, f"{_session_id}.jsonl")
+        if _session_tp != _tp and os.path.exists(_session_tp):
+            _tp = _session_tp
     activity = None
     if _want_scan and _tp:
         from .activity import read_activity
@@ -1203,6 +1238,11 @@ def main(json_output: bool = False,
         # degrades to "no activity line" instead of blanking the whole bar.
         try:
             activity = read_activity(_tp)
+            # Opt-in live progress: enrich running agents from their subagent
+            # transcripts. Same guard so a failure never blanks the bar.
+            if cfg.show_agent_progress and activity is not None:
+                from .activity import enrich_agent_progress
+                enrich_agent_progress(activity, _tp)
         except Exception:
             activity = None
 
@@ -1281,6 +1321,13 @@ def main(json_output: bool = False,
                 show_tools=cfg.show_tools,
                 show_tool_rollup=cfg.show_tool_rollup,
                 show_agents=cfg.show_agents,
+                show_agent_progress=cfg.show_agent_progress,
+                show_mcp_stats=cfg.show_mcp_stats,
+                show_skill_stats=cfg.show_skill_stats,
+                show_agent_stats=cfg.show_agent_stats,
+                show_error_count=cfg.show_error_count,
+                show_web_count=cfg.show_web_count,
+                show_files_touched=cfg.show_files_touched,
             ),
         )
 
@@ -1386,7 +1433,7 @@ def main(json_output: bool = False,
                 if cfg.show_forecast:
                     try:
                         import time as _t
-                        from .predict import forecast
+                        from .predict import forecast, burn_eta_chip
                         f5, f7 = forecast(
                             used_5h=msgs_pct,
                             resets_5h=resets_at,
@@ -1394,9 +1441,16 @@ def main(json_output: bool = False,
                             resets_7d=resets_at_7d,
                             now=_t.time(),
                         )
-                        forecast_kwargs = {"forecast_5h": f5 or "", "forecast_7d": f7 or ""}
+                        b5_result = burn_eta_chip("five_hour", msgs_pct, resets_at, _t.time())
+                        b5, b5_urgent = b5_result if b5_result else ("", False)
+                        forecast_kwargs = {
+                            "forecast_5h": f5 or "", "forecast_7d": f7 or "",
+                            "burn_eta_5h": b5, "burn_eta_5h_urgent": b5_urgent, "burn_eta_7d": "",
+                        }
                     except Exception:
                         forecast_kwargs = {}
+
+                ctx_eta = _ctx_session_eta(ctx_pct, stdin_data.get("total_duration_ms", 0)) if cfg.show_ctx_bar else ""
 
                 print(_render_style(
                     chosen_style,
@@ -1410,6 +1464,8 @@ def main(json_output: bool = False,
                     countdown_emoji=countdown,
                     density=cfg.density, show_weekly=cfg.show_weekly,
                     ctx_pct=ctx_pct,
+                    show_ctx_bar=cfg.show_ctx_bar,
+                    ctx_eta=ctx_eta,
                     shimmer_phase=shimmer_phase,
                     **projection_kwargs,
                     **forecast_kwargs,
@@ -1436,6 +1492,7 @@ def main(json_output: bool = False,
                                  "claude_version": version, "bypass": bypass},
                     }))
                 else:
+                    ctx_eta = _ctx_session_eta(ctx_pct, stdin_data.get("total_duration_ms", 0)) if cfg.show_ctx_bar else ""
                     print(_render_style(
                         chosen_style,
                         msgs_pct=None, weekly_pct=None,
@@ -1447,6 +1504,8 @@ def main(json_output: bool = False,
                         critical_threshold=critical_threshold,
                         density=cfg.density, show_weekly=cfg.show_weekly,
                         ctx_pct=ctx_pct,
+                        show_ctx_bar=cfg.show_ctx_bar,
+                        ctx_eta=ctx_eta,
                         shimmer_phase=shimmer_phase,
                         **identity_kwargs, **mode_kwargs,
                         **activity_kwargs,
@@ -1464,7 +1523,18 @@ def main(json_output: bool = False,
                     print(f"⚠ Run inside Claude Code statusLine for rate-limit data | {model}")
 
     except Exception as e:
-        reset_time = calculate_reset_time(reset_hour=reset_hour).replace(" ", "")
+        import traceback as _tb
+        import os as _os
+        try:
+            _log_path = _os.path.expanduser("~/.cache/claude-statusbar/render_error.log")
+            _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+            with open(_log_path, "a") as _lf:
+                _lf.write(f"--- render exception ---\n{_tb.format_exc()}\n")
+        except Exception:
+            pass
+        _fb_pct = stdin_data.get('rate_limit_pct') if stdin_data else None
+        _fb_7d = stdin_data.get('rate_limit_7d_pct') if stdin_data else None
+        _fb_reset = "--" if _fb_pct is None else calculate_reset_time(reset_hour=reset_hour).replace(" ", "")
         _, display_name = get_current_model(stdin_data)
         bypass = is_bypass_permissions_active()
         if json_output:
@@ -1472,8 +1542,8 @@ def main(json_output: bool = False,
         else:
             print(_render_style(
                 chosen_style,
-                msgs_pct=None, weekly_pct=None,
-                reset_5h=reset_time, reset_7d="",
+                msgs_pct=_fb_pct, weekly_pct=_fb_7d,
+                reset_5h=_fb_reset, reset_7d="",
                 model=display_name, lang_body=lang_body, cost_text=cost_text,
                 bypass=bypass, cache_age_text=cache_age_text,
                 use_color=use_color, theme=chosen_theme,
