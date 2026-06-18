@@ -32,7 +32,8 @@ _MAX_BYTES = 10 * _CHUNK
 # Cap completed-tool counting so "✓ Read ×N" reflects recent activity, not a
 # lifetime total on a long session.
 _RECENT_TOOLS_CAP = 25
-_MAX_AGENTS = 3
+_MAX_AGENTS = 50
+_TOOL_ROLLUP_TTL_S = 90  # hide completed-tool rollup after this many idle seconds
 # Conservative fallback TTL when the transcript carries no cache-write signal
 # (caching disabled / pre-breakdown transcript). Matches Anthropic's base 5min.
 _FALLBACK_TTL_S = 300
@@ -68,7 +69,10 @@ def extract_target(name: str, inp: Dict[str, Any]) -> str:
     if name in _PATTERN_TOOLS:
         return str(inp.get("pattern") or "")
     if name == "Bash":
-        cmd = str(inp.get("command") or "").strip()
+        # Collapse ALL internal whitespace (newlines/tabs/runs of spaces) to a
+        # single space: a heredoc or multi-line command would otherwise inject a
+        # literal newline into the one-line status bar and wrap it across rows.
+        cmd = " ".join(str(inp.get("command") or "").split())
         if len(cmd) > _BASH_MAX:
             return cmd[:_BASH_MAX] + "…"
         return cmd
@@ -175,6 +179,9 @@ class ActivityInfo:
     completed_counts: List[Tuple[str, int]] = field(default_factory=list)
     # running subagents: [{name, model, description, elapsed_seconds, background}]
     agents: List[Dict[str, Any]] = field(default_factory=list)
+    # seconds since the most recent tool_result, or None if no tools ran.
+    # Used to suppress the completed-tool rollup after a period of inactivity.
+    last_tool_age_seconds: Optional[float] = None
     # prompt-cache countdown inputs, gathered in the same scan (see
     # format_cache_countdown): age of the newest assistant turn + the TTL it
     # applied. None when the transcript carries no assistant turn / no signal.
@@ -336,6 +343,11 @@ def read_activity(transcript_path: str,
                 tid = b.get("tool_use_id")
                 if tid:
                     seen_results.add(tid)
+                # First tool_result in reverse scan = most recent completion.
+                if info.last_tool_age_seconds is None:
+                    ts = _parse_ts(entry.get("timestamp", ""))
+                    if ts is not None:
+                        info.last_tool_age_seconds = max(0.0, (now - ts).total_seconds())
                 continue
             if bt != "tool_use":
                 continue

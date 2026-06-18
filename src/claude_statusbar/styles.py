@@ -471,10 +471,16 @@ def render_activity_line(activity, *, theme: Theme, use_color: bool = True,
         segs.append(f"{WARN}◐{RESET} {INK}{name}{RESET}{tail}")
 
     if show_tool_rollup and activity is not None and activity.completed_counts:
-        # Tool name brightened (ink), ×count muted — scannable hierarchy.
-        roll = " ".join(f"{INK}{n}{RESET}{MUTE}×{c}{RESET}"
-                        for n, c in activity.completed_counts[:3])
-        segs.append(f"{OK}✓{RESET} {roll}")
+        # Suppress rollup when tools have been idle > TTL and nothing is active.
+        from .activity import _TOOL_ROLLUP_TTL_S
+        age = activity.last_tool_age_seconds
+        rollup_fresh = (activity.active_tool is not None
+                        or age is None
+                        or age < _TOOL_ROLLUP_TTL_S)
+        if rollup_fresh:
+            roll = " ".join(f"{INK}{n}{RESET}{MUTE}×{c}{RESET}"
+                            for n, c in activity.completed_counts[:3])
+            segs.append(f"{OK}✓{RESET} {roll}")
 
     if not segs:
         return ""
@@ -511,6 +517,35 @@ def render_agent_lines(agents, *, theme: Theme, use_color: bool = True) -> list:
                 f"{desc_part} {MUTE}{el}{RESET}")
         lines.append(_strip(line) if not use_color else line)
     return lines
+
+
+def _agent_model_family(raw: str) -> str:
+    """Normalize a raw model id/alias to a short family name."""
+    s = (raw or "").lower()
+    if "opus" in s:   return "Opus"
+    if "sonnet" in s: return "Sonnet"
+    if "haiku" in s:  return "Haiku"
+    if "fable" in s:  return "Fable"
+    return raw[:8] if raw else "?"
+
+
+def render_agent_model_summary(agents, *, theme: Theme, use_color: bool = True) -> str:
+    """Compact agent model summary: `◈ Opus×4 Sonnet×3 Haiku×2` (9 total).
+
+    Groups running subagents by model family; most-frequent first.
+    Returns "" when no agents are running.
+    """
+    if not agents:
+        return ""
+    from collections import Counter
+    counts = Counter(_agent_model_family(ag.get("model") or "") for ag in agents)
+    MUTE = _fg(theme.mute)
+    INK  = _fg(theme.ink)
+    WARN = _fg(theme.s_warn)
+    parts = [f"{INK}{model}{RESET}{MUTE}×{count}{RESET}"
+             for model, count in counts.most_common()]
+    result = f"{WARN}◈{RESET} " + " ".join(parts)
+    return _strip(result) if not use_color else result
 
 
 # Per-effort gradient palettes — a MONOTONIC grey→blue→purple ladder matching
@@ -670,10 +705,12 @@ def render(style: str, **kwargs) -> str:
     fn = RENDERERS.get(style, render_classic)
     out = fn(**kwargs)
 
+    # Build identity line (project / branch / stats) — not appended yet.
+    id_line = ""
     if show_pb and info is not None:
         version_text = _statusbar_version() if show_version else ""
         update_text = _update_hint() if show_version else ""
-        out = out + "\n" + render_identity_line(
+        id_line = render_identity_line(
             info, theme=theme, dirty=dirty, ahead=ahead, behind=behind,
             duration_text=duration_text, lines_text=lines_text,
             version_text=version_text, update_text=update_text,
@@ -688,18 +725,23 @@ def render(style: str, **kwargs) -> str:
         if mode_line:
             out = out + "\n" + mode_line
 
+    # Build activity line and agent model summary, then merge all onto one line.
+    act_line = ""
+    agents_summary = ""
     if activity_opts:
         opts = dict(activity_opts)
         show_agents = opts.pop("show_agents", False)
         act_line = render_activity_line(
             activity, theme=theme, use_color=use_color, **opts)
-        if act_line:
-            out = out + "\n" + act_line
-        # Subagents get their own bottom line(s), one per running agent.
         if show_agents and activity is not None and activity.agents:
-            for agline in render_agent_lines(
-                    activity.agents, theme=theme, use_color=use_color):
-                out = out + "\n" + agline
+            agents_summary = render_agent_model_summary(
+                activity.agents, theme=theme, use_color=use_color)
+
+    # Concatenate identity · activity · agents onto a single second line.
+    mute_sep = f" {_fg(theme.mute)}·{RESET} " if use_color else " · "
+    combined = mute_sep.join(p for p in [id_line, act_line, agents_summary] if p)
+    if combined:
+        out = out + "\n" + combined
     return out
 
 
