@@ -1194,7 +1194,8 @@ def main(json_output: bool = False,
     # cache countdown: read_activity also returns cache_age_seconds/cache_ttl.
     # When the activity line isn't wanted, fall back to the lean early-exit
     # cache reader (get_cache_age_text) so a cache-only render stays cheap.
-    _want_scan = cfg.show_todos or cfg.show_tools or cfg.show_agents
+    _want_scan = (cfg.show_todos or cfg.show_tools or cfg.show_agents
+                  or cfg.show_agent_progress)
     _tp = stdin_data.get("transcript_path", "")
     activity = None
     if _want_scan and _tp:
@@ -1205,6 +1206,15 @@ def main(json_output: bool = False,
             activity = read_activity(_tp)
         except Exception:
             activity = None
+        # Per-subagent live progress (current tool/model) is heavier — reads each
+        # subagent transcript. Best-effort: a failure here just drops the detail,
+        # it must never blank the activity line.
+        if cfg.show_agent_progress and activity is not None:
+            try:
+                from .activity import enrich_agent_progress
+                enrich_agent_progress(activity, _tp)
+            except Exception:
+                pass
 
     # Optional cache age segment — from the shared scan when we did one, else
     # the standalone reader (cache-only render, no transcript, or scan failed).
@@ -1281,6 +1291,7 @@ def main(json_output: bool = False,
                 show_tools=cfg.show_tools,
                 show_tool_rollup=cfg.show_tool_rollup,
                 show_agents=cfg.show_agents,
+                show_agent_progress=cfg.show_agent_progress,
             ),
         )
 

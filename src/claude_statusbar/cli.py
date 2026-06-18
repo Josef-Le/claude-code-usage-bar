@@ -36,6 +36,7 @@ def _run_config_subcommand(rest):
         print(f"show_tools          = {cfg.show_tools}")
         print(f"show_tool_rollup    = {cfg.show_tool_rollup}")
         print(f"show_agents         = {cfg.show_agents}")
+        print(f"show_agent_progress = {cfg.show_agent_progress}")
         print(f"show_duration       = {cfg.show_duration}")
         print(f"show_lines          = {cfg.show_lines}")
         print(f"show_version        = {cfg.show_version}")

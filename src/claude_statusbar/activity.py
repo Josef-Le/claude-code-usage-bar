@@ -381,6 +381,7 @@ def read_activity(transcript_path: str,
                 start = _parse_ts(entry.get("timestamp", ""))
                 elapsed = max(0.0, (now - start).total_seconds()) if start else 0.0
                 info.agents.append({
+                    "_tid": tid,  # links to subagents/agent-<id>.jsonl (enrich_agent_progress)
                     "name": str(inp.get("subagent_type") or "agent"),
                     "description": str(inp.get("description") or ""),
                     "model": str(inp.get("model") or ""),
@@ -400,3 +401,105 @@ def read_activity(transcript_path: str,
     # Most frequent first; dict order (recency, newest-first) breaks ties.
     info.completed_counts = sorted(completed.items(), key=lambda kv: -kv[1])
     return info
+
+
+# ---------------------------------------------------------------------------
+# Per-subagent live progress (opt-in: show_agent_progress)
+# ---------------------------------------------------------------------------
+def _subagent_progress(jsonl_path: str,
+                       now: datetime) -> Optional[Dict[str, Any]]:
+    """Current tool + call count + idle seconds from one subagent transcript.
+
+    `active` = the tool the subagent is running right now (its newest tool_use
+    with no tool_result yet); falls back to the most recent tool when nothing is
+    pending. Returns None on read error. Full-file read — a subagent transcript
+    is short-lived and small, so this stays cheap.
+    """
+    ncalls = 0
+    pending: List[Tuple[Any, str]] = []   # (tool_use_id, name) in file order
+    results: set = set()
+    last_ts: Optional[datetime] = None
+    try:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                try:
+                    e = json.loads(raw)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                ts = _parse_ts(e.get("timestamp", ""))
+                if ts is not None:
+                    last_ts = ts
+                msg = e.get("message") or {}
+                c = msg.get("content")
+                if not isinstance(c, list):
+                    continue
+                for b in c:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use":
+                        ncalls += 1
+                        pending.append((b.get("id"), b.get("name") or "?"))
+                    elif b.get("type") == "tool_result":
+                        results.add(b.get("tool_use_id"))
+    except OSError:
+        return None
+    active = last_tool = ""
+    for tid, name in reversed(pending):
+        if not last_tool:
+            last_tool = shorten_tool_name(str(name))
+        if tid not in results:
+            active = shorten_tool_name(str(name))
+            break
+    idle = (now - last_ts).total_seconds() if last_ts else None
+    return {"active": active or last_tool, "calls": ncalls, "idle": idle}
+
+
+def enrich_agent_progress(info: ActivityInfo, transcript_path: str,
+                          now: Optional[datetime] = None) -> None:
+    """Attach a per-agent ``progress`` dict (current tool, call count, idle) onto
+    each running agent in ``info.agents``, read from the subagent transcripts at
+    ``<session>/subagents/agent-<id>.jsonl``. In-place, best-effort, opt-in.
+
+    The link is the agent's ``_tid`` (its parent tool_use id), matched against
+    each ``agent-*.meta.json``'s ``toolUseId``.
+    """
+    if not info.agents:
+        return
+    now = now or datetime.now(timezone.utc)
+    want = {ag.get("_tid") for ag in info.agents if ag.get("_tid")}
+    if not want:
+        return
+    sub_dir = os.path.join(os.path.splitext(transcript_path)[0], "subagents")
+    try:
+        entries = os.listdir(sub_dir)
+    except OSError:
+        return
+    cutoff = now.timestamp() - 600.0   # ignore stale subagent files
+    tid_to_file: Dict[str, str] = {}
+    for fn in entries:
+        if not fn.endswith(".meta.json"):
+            continue
+        jsonl = os.path.join(sub_dir, fn[:-len(".meta.json")] + ".jsonl")
+        try:
+            if os.path.getmtime(jsonl) < cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(os.path.join(sub_dir, fn), "r",
+                      encoding="utf-8", errors="replace") as mf:
+                meta = json.load(mf)
+        except (OSError, ValueError):
+            continue
+        tu = meta.get("toolUseId")
+        if tu in want and tu not in tid_to_file:
+            tid_to_file[tu] = jsonl
+    for ag in info.agents:
+        path = tid_to_file.get(ag.get("_tid"))
+        if not path:
+            continue
+        prog = _subagent_progress(path, now)
+        if prog:
+            ag["progress"] = prog

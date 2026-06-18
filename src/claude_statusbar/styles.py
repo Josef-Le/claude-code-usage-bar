@@ -529,16 +529,28 @@ def _agent_model_family(raw: str) -> str:
     return raw[:8] if raw else "?"
 
 
-def render_agent_model_summary(agents, *, theme: Theme, use_color: bool = True) -> str:
+def _agent_family(ag, main_model_family: str) -> str:
+    """Model family for one agent, resolving the unset case to the main model.
+
+    A subagent dispatch often omits ``model`` (it inherits the main model), which
+    would otherwise render as `?`. Fall back to the main model family when known.
+    """
+    fam = _agent_model_family(ag.get("model") or "")
+    return main_model_family if (fam == "?" and main_model_family) else fam
+
+
+def render_agent_model_summary(agents, *, theme: Theme, use_color: bool = True,
+                               main_model_family: str = "") -> str:
     """Compact agent model summary: `◈ Opus×4 Sonnet×3 Haiku×2` (9 total).
 
-    Groups running subagents by model family; most-frequent first.
+    Groups running subagents by model family; most-frequent first. Agents whose
+    dispatch didn't pin a model fall back to ``main_model_family`` (else `?`).
     Returns "" when no agents are running.
     """
     if not agents:
         return ""
     from collections import Counter
-    counts = Counter(_agent_model_family(ag.get("model") or "") for ag in agents)
+    counts = Counter(_agent_family(ag, main_model_family) for ag in agents)
     MUTE = _fg(theme.mute)
     INK  = _fg(theme.ink)
     WARN = _fg(theme.s_warn)
@@ -546,6 +558,36 @@ def render_agent_model_summary(agents, *, theme: Theme, use_color: bool = True) 
              for model, count in counts.most_common()]
     result = f"{WARN}◈{RESET} " + " ".join(parts)
     return _strip(result) if not use_color else result
+
+
+def render_agent_progress_lines(agents, *, theme: Theme, use_color: bool = True,
+                                main_model_family: str = "") -> list:
+    """One line per running subagent: `◐ <type>[<Model>] <current-tool> · <elapsed>`.
+
+    `<Model>` falls back to the main model when the dispatch didn't pin one. The
+    current tool comes from each agent's ``progress`` dict
+    (``activity.enrich_agent_progress``); omitted when progress wasn't gathered.
+    Returns [] when no agents are running. Capped at ``_MAX_AGENTS`` by the caller.
+    """
+    from .activity import format_elapsed_short
+    if not agents:
+        return []
+    MUTE = _fg(theme.mute)
+    INK  = _fg(theme.ink)
+    WARN = _fg(theme.s_warn)
+    lines = []
+    for ag in agents:
+        fam = _agent_family(ag, main_model_family)
+        name = ag.get("name", "agent")
+        prog = ag.get("progress") or {}
+        tool = prog.get("active") or ""
+        el = format_elapsed_short(ag.get("elapsed_seconds", 0))
+        badge = f"{MUTE}[{fam}]{RESET}"
+        tool_part = f" {INK}{tool}{RESET}" if tool else ""
+        line = (f"{WARN}◐{RESET} {INK}{name}{RESET}{badge}{tool_part} "
+                f"{MUTE}· {el}{RESET}")
+        lines.append(_strip(line) if not use_color else line)
+    return lines
 
 
 # Per-effort gradient palettes — a MONOTONIC grey→blue→purple ladder matching
@@ -726,22 +768,34 @@ def render(style: str, **kwargs) -> str:
             out = out + "\n" + mode_line
 
     # Build activity line and agent model summary, then merge all onto one line.
+    # Per-agent detail lines (opt-in) go on their own lines beneath it.
+    main_model_family = _agent_model_family(kwargs.get("model") or "")
     act_line = ""
     agents_summary = ""
+    agent_progress_lines = []
     if activity_opts:
         opts = dict(activity_opts)
         show_agents = opts.pop("show_agents", False)
+        show_agent_progress = opts.pop("show_agent_progress", False)
         act_line = render_activity_line(
             activity, theme=theme, use_color=use_color, **opts)
         if show_agents and activity is not None and activity.agents:
             agents_summary = render_agent_model_summary(
-                activity.agents, theme=theme, use_color=use_color)
+                activity.agents, theme=theme, use_color=use_color,
+                main_model_family=main_model_family)
+        if show_agent_progress and activity is not None and activity.agents:
+            agent_progress_lines = render_agent_progress_lines(
+                activity.agents, theme=theme, use_color=use_color,
+                main_model_family=main_model_family)
 
     # Concatenate identity · activity · agents onto a single second line.
     mute_sep = f" {_fg(theme.mute)}·{RESET} " if use_color else " · "
     combined = mute_sep.join(p for p in [id_line, act_line, agents_summary] if p)
     if combined:
         out = out + "\n" + combined
+    # Per-subagent detail: one line each, beneath the merged line.
+    for aline in agent_progress_lines:
+        out = out + "\n" + aline
     return out
 
 

@@ -46,6 +46,9 @@ class StatusbarConfig:
     show_tools: bool = False
     show_tool_rollup: bool = False
     show_agents: bool = False
+    # Per-subagent detail lines (model + live tool) beneath the ◈ summary.
+    # Reads each subagent's own transcript, so it's heavier — opt-in.
+    show_agent_progress: bool = False
     show_duration: bool = False
     show_lines: bool = True
     show_ahead_behind: bool = False
@@ -109,6 +112,7 @@ def load_config(path: Optional[Path] = None) -> StatusbarConfig:
         show_tools=_to_bool(raw.get("show_tools", False)),
         show_tool_rollup=_to_bool(raw.get("show_tool_rollup", False)),
         show_agents=_to_bool(raw.get("show_agents", False)),
+        show_agent_progress=_to_bool(raw.get("show_agent_progress", False)),
         show_duration=_to_bool(raw.get("show_duration", False)),
         show_lines=_to_bool(raw.get("show_lines", True)),
         show_ahead_behind=_to_bool(raw.get("show_ahead_behind", False)),
@@ -138,7 +142,7 @@ VALID_KEYS = {
     "style", "theme", "density", "auto_compact_width",
     "show_weekly", "show_language", "show_cost", "show_cache_age",
     "show_project_branch",
-    "show_todos", "show_tools", "show_tool_rollup", "show_agents",
+    "show_todos", "show_tools", "show_tool_rollup", "show_agents", "show_agent_progress",
     "show_duration", "show_lines", "show_ahead_behind", "show_version",
     "bar_shimmer", "show_forecast", "show_projection",
     "show_mode", "mode_gradient",
@@ -148,7 +152,7 @@ VALID_KEYS = {
 }
 _BOOL_KEYS = {"show_weekly", "show_language", "show_cost", "show_cache_age",
               "show_project_branch",
-              "show_todos", "show_tools", "show_tool_rollup", "show_agents",
+              "show_todos", "show_tools", "show_tool_rollup", "show_agents", "show_agent_progress",
               "show_duration", "show_lines", "show_ahead_behind", "show_version",
               "bar_shimmer", "show_forecast", "show_projection",
               "show_mode", "mode_gradient"}
