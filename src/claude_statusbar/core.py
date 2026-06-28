@@ -839,13 +839,24 @@ def check_for_updates(session_id: str = ''):
         return
 
     # Never auto-upgrade an editable install — local customizations would be
-    # silently overwritten by PyPI. An editable dist exposes
-    # editable_project_location (PEP 660 / pip 21.3+).
+    # silently overwritten by PyPI. Two detection paths:
+    # 1. PEP 660 (pip 21.3+): editable_project_location attribute
+    # 2. Legacy: direct_url.json with {"dir_info": {"editable": true}}
     try:
         import importlib.metadata as _imeta
+        import json as _json
         _dist = _imeta.distribution('claude-statusbar')
         if getattr(_dist, 'editable_project_location', None):
             return
+        for _f in (_dist.files or []):
+            if 'direct_url' in str(_f):
+                _p = _dist._path.parent / _f
+                try:
+                    _info = _json.loads(_p.read_text(encoding='utf-8'))
+                    if _info.get('dir_info', {}).get('editable'):
+                        return
+                except Exception:
+                    pass
     except Exception:
         pass
 
