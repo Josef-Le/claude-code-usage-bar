@@ -838,6 +838,17 @@ def check_for_updates(session_id: str = ''):
     if env_val in ('1', 'true', 'yes'):
         return
 
+    # Never auto-upgrade an editable install — local customizations would be
+    # silently overwritten by PyPI. An editable dist exposes
+    # editable_project_location (PEP 660 / pip 21.3+).
+    try:
+        import importlib.metadata as _imeta
+        _dist = _imeta.distribution('claude-statusbar')
+        if getattr(_dist, 'editable_project_location', None):
+            return
+    except Exception:
+        pass
+
     try:
         cache_dir = Path.home() / '.cache' / 'claude-statusbar'
         cache_dir.mkdir(parents=True, exist_ok=True)
