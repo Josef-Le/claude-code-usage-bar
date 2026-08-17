@@ -56,7 +56,32 @@ def parse_git_status_branch(
 def refresh(toplevel: str, timeout_s: float = 2.0) -> None:
     try:
         proc = subprocess.run(
-            ["git", "-C", toplevel, "status", "--porcelain=v1", "--branch"],
+            # --no-optional-locks is REQUIRED here, not a micro-optimisation.
+            #
+            # Plain `git status` takes .git/index.lock to write back its
+            # refreshed stat cache whenever the working tree has changed since
+            # the last refresh. subprocess.run(timeout=...) kills the child with
+            # SIGKILL, which git cannot trap, so a timed-out refresh leaves a
+            # 0-byte index.lock behind. Every later write in that repo then
+            # fails with "Another git process seems to be running", while reads
+            # keep working -- so nothing surfaces it.
+            # Varonis-Systems/Azulays-agentic-teams was poisoned that way for 30
+            # hours, which also silently disabled the Stop-hook auto-checkpoint.
+            #
+            # Measured 2026-08-17 (20k-file repo, stale stat cache):
+            #     git status                    -> takes index.lock: yes
+            #     git --no-optional-locks status -> takes index.lock: no
+            # The flag exists for exactly this: read-only pollers like status
+            # bars and editors must never take a write lock.
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                toplevel,
+                "status",
+                "--porcelain=v1",
+                "--branch",
+            ],
             capture_output=True,
             text=True,
             timeout=timeout_s,
